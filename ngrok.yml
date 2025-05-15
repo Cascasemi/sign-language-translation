@@ -1,0 +1,7 @@
+version: "2"
+authtoken: 2ntKNvCrbxqN2Q4XLxCMcjQasnJ_kH2iy6Rwqt4zdvq6CBu8 # Only needed if not already set
+tunnels:
+  my-tunnel:
+    proto: http
+    addr: 5000
+    domain: fit-firstly-tuna.ngrok-free.app

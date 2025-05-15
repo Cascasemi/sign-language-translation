@@ -149,7 +149,18 @@
         const confidenceLevel = document.getElementById('confidenceLevel');
 
         // Server connection
-        const socket = io('http://localhost:5000');
+        // For development (localhost) and production (ngrok)
+const socketUrl = window.location.hostname === 'localhost'
+  ? 'http://localhost:5000'
+  : 'https://fit-firstly-tuna.ngrok-free.app';
+
+const socket = io(socketUrl, {
+  // Additional options if needed
+  withCredentials: true,
+  extraHeaders: {
+    "ngrok-skip-browser-warning": "true" // This helps bypass ngrok's warning page
+  }
+});
         let isConnected = false;
         let stream;
         let captureInterval;

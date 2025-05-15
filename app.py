@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request, send_from_directory
 from flask_socketio import SocketIO, emit
+from flask_cors import CORS
 import pickle
 import cv2
 import mediapipe as mp
@@ -12,9 +13,33 @@ import time
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
+# Initialize Flask app
 app = Flask(__name__, static_folder='static')
 app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Configure CORS
+CORS(app, resources={
+    r"/*": {
+        "origins": [
+            "https://fit-firstly-tuna.ngrok-free.app",
+            "http://localhost:*",
+            "http://127.0.0.1:*"
+        ],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
+
+# Configure Socket.IO
+socketio = SocketIO(app,
+    cors_allowed_origins=[
+        "https://fit-firstly-tuna.ngrok-free.app",
+        "http://localhost:5000",
+        "http://127.0.0.1:*"
+    ],
+    logger=True,
+    engineio_logger=True
+)
 
 # Load model
 try:
@@ -44,37 +69,48 @@ hands = mp_hands.Hands(
     min_detection_confidence=0.5
 )
 
-
 @app.route('/')
 def index():
     return jsonify({"status": "API is running"})
-
 
 @app.route('/test')
 def test():
     return send_from_directory('static', 'test_local.html')
 
-
 @app.route('/health')
 def health():
-    return jsonify({"status": "healthy", "model_loaded": model is not None})
+    return jsonify({
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "server_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    })
 
+@app.after_request
+def after_request(response):
+    """Add additional CORS headers"""
+    response.headers.add('Access-Control-Allow-Origin', 'https://fit-firstly-tuna.ngrok-free.app')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    return response
 
 @socketio.on('connect')
 def handle_connect():
-    print('Client connected:', request.sid)
-    emit('connection_status', {'status': 'connected'})
-
+    print(f'Client connected: {request.sid}')
+    emit('connection_status', {
+        'status': 'connected',
+        'sid': request.sid,
+        'server_time': time.strftime("%Y-%m-%d %H:%M:%S")
+    })
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print('Client disconnected:', request.sid)
-
+    print(f'Client disconnected: {request.sid}')
 
 @socketio.on('frame')
 def handle_frame(data):
     if 'image' not in data:
-        emit('error', {'message': 'No image data received'})
+        emit('error', {'message': 'No image data received'}, room=request.sid)
         return
 
     try:
@@ -84,27 +120,30 @@ def handle_frame(data):
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if frame is None:
-            emit('error', {'message': 'Could not decode image'})
+            emit('error', {'message': 'Could not decode image'}, room=request.sid)
             return
 
-        # Process frame and get annotated image
+        # Process frame
         annotated_frame, prediction_data = process_frame(frame)
 
-        # Encode annotated frame to send back
+        # Encode annotated frame
         _, buffer = cv2.imencode('.jpg', annotated_frame)
         frame_base64 = base64.b64encode(buffer).decode('utf-8')
 
-        # Send both prediction and annotated frame
+        # Send response
         emit('prediction', {
             'text': prediction_data['text'],
             'confidence': prediction_data['confidence'],
-            'annotated_frame': frame_base64
+            'annotated_frame': frame_base64,
+            'timestamp': time.strftime("%Y-%m-%d %H:%M:%S")
         }, room=request.sid)
 
     except Exception as e:
         print(f"Error processing frame: {e}")
-        emit('error', {'message': f'Error processing image: {str(e)}'}, room=request.sid)
-
+        emit('error', {
+            'message': f'Error processing image: {str(e)}',
+            'timestamp': time.strftime("%Y-%m-%d %H:%M:%S")
+        }, room=request.sid)
 
 def process_frame(frame):
     data_aux = []
@@ -121,7 +160,7 @@ def process_frame(frame):
 
     if results.multi_hand_landmarks:
         for hand_landmarks in results.multi_hand_landmarks:
-            # Draw landmarks and connections
+            # Draw landmarks
             mp_drawing.draw_landmarks(
                 annotated_frame,
                 hand_landmarks,
@@ -130,7 +169,7 @@ def process_frame(frame):
                 mp_drawing_styles.get_default_hand_connections_style()
             )
 
-            # Collect landmark data for prediction
+            # Collect landmark data
             for i in range(len(hand_landmarks.landmark)):
                 x = hand_landmarks.landmark[i].x
                 y = hand_landmarks.landmark[i].y
@@ -156,7 +195,12 @@ def process_frame(frame):
 
     return annotated_frame, prediction_data
 
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port, debug=True)
+    print(f"Starting server on port {port}")
+    print(f"Ngrok URL: https://fit-firstly-tuna.ngrok-free.app")
+    socketio.run(app,
+        host='0.0.0.0',
+        port=port,
+        debug=True
+    )
