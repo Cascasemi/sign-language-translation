@@ -32,14 +32,14 @@ CORS(app, resources={
 
 # Configure Socket.IO
 socketio = SocketIO(app,
-    cors_allowed_origins=[
-        "https://fit-firstly-tuna.ngrok-free.app",
-        "http://localhost:5000",
-        "http://127.0.0.1:*"
-    ],
-    logger=True,
-    engineio_logger=True
-)
+                    cors_allowed_origins=[
+                        "https://fit-firstly-tuna.ngrok-free.app",
+                        "http://localhost:5000",
+                        "http://127.0.0.1:*"
+                    ],
+                    logger=True,
+                    engineio_logger=True
+                    )
 
 # Load model
 try:
@@ -63,27 +63,87 @@ labels_dict = {
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
+mp_selfie_segmentation = mp.solutions.selfie_segmentation
+
 hands = mp_hands.Hands(
-    static_image_mode=True,
+    static_image_mode=False,
     max_num_hands=2,
     min_detection_confidence=0.5
 )
+
+# Initialize selfie segmentation for background removal
+selfie_segmentation = mp_selfie_segmentation.SelfieSegmentation(model_selection=1)
+
+# Global background image
+background_image = None
+
+
+def load_background_image(image_path, width=640, height=480):
+    """Load and resize background image"""
+    global background_image
+    try:
+        bg = cv2.imread(image_path)
+        if bg is not None:
+            background_image = cv2.resize(bg, (width, height))
+            print(f"Background image loaded: {image_path}")
+            return True
+        else:
+            print(f"Could not load background image: {image_path}")
+            return False
+    except Exception as e:
+        print(f"Error loading background image: {e}")
+        return False
+
+
+# Load default background (you can change this path)
+load_background_image('./background.jpg')  # Place your background image here
+
 
 @app.route('/')
 def index():
     return jsonify({"status": "API is running"})
 
+
 @app.route('/test')
 def test():
     return send_from_directory('static', 'test_local.html')
+
 
 @app.route('/health')
 def health():
     return jsonify({
         "status": "healthy",
         "model_loaded": model is not None,
+        "background_loaded": background_image is not None,
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     })
+
+
+@app.route('/upload_background', methods=['POST'])
+def upload_background():
+    """Upload a new background image"""
+    try:
+        if 'background' not in request.files:
+            return jsonify({'error': 'No background file provided'}), 400
+
+        file = request.files['background']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+
+        # Save uploaded file
+        filename = 'uploaded_background.jpg'
+        filepath = os.path.join('.', filename)
+        file.save(filepath)
+
+        # Load the new background
+        if load_background_image(filepath):
+            return jsonify({'message': 'Background updated successfully'})
+        else:
+            return jsonify({'error': 'Failed to load background image'}), 500
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 @app.after_request
 def after_request(response):
@@ -94,18 +154,22 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Credentials', 'true')
     return response
 
+
 @socketio.on('connect')
 def handle_connect():
     print(f'Client connected: {request.sid}')
     emit('connection_status', {
         'status': 'connected',
         'sid': request.sid,
-        'server_time': time.strftime("%Y-%m-%d %H:%M:%S")
+        'server_time': time.strftime("%Y-%m-%d %H:%M:%S"),
+        'background_available': background_image is not None
     })
+
 
 @socketio.on('disconnect')
 def handle_disconnect():
     print(f'Client disconnected: {request.sid}')
+
 
 @socketio.on('frame')
 def handle_frame(data):
@@ -123,8 +187,11 @@ def handle_frame(data):
             emit('error', {'message': 'Could not decode image'}, room=request.sid)
             return
 
+        # Get background replacement preference
+        use_background_replacement = data.get('background_replacement', True)
+
         # Process frame
-        annotated_frame, prediction_data = process_frame(frame)
+        annotated_frame, prediction_data = process_frame(frame, use_background_replacement)
 
         # Encode annotated frame
         _, buffer = cv2.imencode('.jpg', annotated_frame)
@@ -145,11 +212,53 @@ def handle_frame(data):
             'timestamp': time.strftime("%Y-%m-%d %H:%M:%S")
         }, room=request.sid)
 
-def process_frame(frame):
+
+def apply_background_replacement(frame):
+    """Apply background replacement using MediaPipe selfie segmentation"""
+    global background_image
+
+    if background_image is None:
+        return frame
+
+    try:
+        # Convert BGR to RGB for MediaPipe
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Process the frame to get segmentation mask
+        results = selfie_segmentation.process(rgb_frame)
+
+        # Create mask
+        mask = results.segmentation_mask
+
+        # Resize background to match frame size
+        h, w = frame.shape[:2]
+        bg_resized = cv2.resize(background_image, (w, h))
+
+        # Create 3-channel mask
+        mask_3channel = np.stack((mask,) * 3, axis=-1)
+
+        # Apply threshold to create binary mask
+        mask_3channel = (mask_3channel > 0.5).astype(np.float32)
+
+        # Blend foreground and background
+        result = frame * mask_3channel + bg_resized * (1 - mask_3channel)
+
+        return result.astype(np.uint8)
+
+    except Exception as e:
+        print(f"Error in background replacement: {e}")
+        return frame
+
+
+def process_frame(frame, use_background_replacement=True):
     data_aux = []
     x_ = []
     y_ = []
     prediction_data = {'text': '', 'confidence': 0}
+
+    # Apply background replacement first if enabled
+    if use_background_replacement:
+        frame = apply_background_replacement(frame)
 
     # Convert to RGB and process with MediaPipe
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -175,32 +284,41 @@ def process_frame(frame):
                 y = hand_landmarks.landmark[i].y
                 x_.append(x)
                 y_.append(y)
-                data_aux.append(x - min(x_))
-                data_aux.append(y - min(y_))
 
-            # Make prediction if model is loaded
-            if model:
-                try:
-                    prediction = model.predict([np.asarray(data_aux)])
-                    prediction_proba = model.predict_proba([np.asarray(data_aux)])
-                    confidence = max(prediction_proba[0])
-                    predicted_character = labels_dict[int(prediction[0])]
+            # Only add to data_aux if we have landmarks
+            if x_ and y_:
+                min_x, min_y = min(x_), min(y_)
+                for i in range(len(hand_landmarks.landmark)):
+                    x = hand_landmarks.landmark[i].x
+                    y = hand_landmarks.landmark[i].y
+                    data_aux.append(x - min_x)
+                    data_aux.append(y - min_y)
 
-                    prediction_data = {
-                        'text': predicted_character,
-                        'confidence': float(confidence)
-                    }
-                except Exception as e:
-                    print(f"Prediction error: {e}")
+                # Make prediction if model is loaded and we have enough data
+                if model and len(data_aux) >= 42:  # 21 landmarks * 2 coordinates
+                    try:
+                        prediction = model.predict([np.asarray(data_aux[:42])])
+                        prediction_proba = model.predict_proba([np.asarray(data_aux[:42])])
+                        confidence = max(prediction_proba[0])
+                        predicted_character = labels_dict[int(prediction[0])]
+
+                        prediction_data = {
+                            'text': predicted_character,
+                            'confidence': float(confidence)
+                        }
+                    except Exception as e:
+                        print(f"Prediction error: {e}")
 
     return annotated_frame, prediction_data
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"Starting server on port {port}")
     print(f"Ngrok URL: https://fit-firstly-tuna.ngrok-free.app")
+    print("Place your background image as 'background.jpg' in the same directory")
     socketio.run(app,
-        host='0.0.0.0',
-        port=port,
-        debug=True
-    )
+                 host='0.0.0.0',
+                 port=port,
+                 debug=True
+                 )
