@@ -71,8 +71,8 @@ hands = mp_hands.Hands(
     min_detection_confidence=0.5
 )
 
-# Initialize selfie segmentation for background removal (use model 0 for speed)
-selfie_segmentation = mp_selfie_segmentation.SelfieSegmentation(model_selection=0)
+# Initialize selfie segmentation for background removal
+selfie_segmentation = mp_selfie_segmentation.SelfieSegmentation(model_selection=1)
 
 # Global background image
 background_image = None
@@ -227,17 +227,21 @@ def apply_background_replacement(frame):
         # Process the frame to get segmentation mask
         results = selfie_segmentation.process(rgb_frame)
 
-        # Create mask with optimized threshold
-        mask = results.segmentation_mask > 0.1
+        # Create mask
+        mask = results.segmentation_mask
 
-        # Resize background to match frame size (cache this if possible)
+        # Resize background to match frame size
         h, w = frame.shape[:2]
-        if not hasattr(apply_background_replacement, 'cached_bg') or apply_background_replacement.cached_bg.shape[
-                                                                     :2] != (h, w):
-            apply_background_replacement.cached_bg = cv2.resize(background_image, (w, h))
+        bg_resized = cv2.resize(background_image, (w, h))
 
-        # Use numpy where for faster blending
-        result = np.where(mask[..., None], frame, apply_background_replacement.cached_bg)
+        # Create 3-channel mask
+        mask_3channel = np.stack((mask,) * 3, axis=-1)
+
+        # Apply threshold to create binary mask
+        mask_3channel = (mask_3channel > 0.5).astype(np.float32)
+
+        # Blend foreground and background
+        result = frame * mask_3channel + bg_resized * (1 - mask_3channel)
 
         return result.astype(np.uint8)
 
