@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sign Language Translator with Landmarks</title>
+    <title>Sign Language Translator with Background Replacement</title>
     <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
     <style>
         body {
@@ -13,7 +13,7 @@
             background-color: #f0f8ff;
         }
         .container {
-            max-width: 800px;
+            max-width: 900px;
             margin: 0 auto;
             background-color: white;
             border-radius: 10px;
@@ -39,6 +39,81 @@
             background-color: #f8d7da;
             color: #721c24;
         }
+        .controls-section {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .controls-section h3 {
+            margin-top: 0;
+            color: #495057;
+        }
+        .background-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+        }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #1a73e8;
+        }
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+        .file-upload {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .file-upload input[type="file"] {
+            display: none;
+        }
+        .file-upload label {
+            padding: 8px 16px;
+            background-color: #6c757d;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .file-upload label:hover {
+            background-color: #5a6268;
+        }
         .video-container {
             display: flex;
             flex-direction: column;
@@ -46,7 +121,7 @@
             margin-bottom: 20px;
         }
         #video {
-            display: none; /* Hide raw video feed */
+            display: none;
         }
         #processedVideo {
             width: 100%;
@@ -107,20 +182,40 @@
             color: #6c757d;
             font-size: 14px;
         }
+        .upload-status {
+            margin-left: 10px;
+            font-size: 14px;
+            color: #28a745;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Sign Language Translator with Landmarks</h1>
+        <h1>Sign Language Translator with Background Replacement</h1>
 
         <div id="status" class="status disconnected">
             Disconnected from server
         </div>
 
+        <div class="controls-section">
+            <h3>Background Controls</h3>
+            <div class="background-controls">
+                <label for="backgroundToggle">Background Replacement:</label>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="backgroundToggle" checked>
+                    <span class="slider"></span>
+                </label>
+
+                <div class="file-upload">
+                    <label for="backgroundUpload">Upload Background Image</label>
+                    <input type="file" id="backgroundUpload" accept="image/*">
+                    <span id="uploadStatus" class="upload-status"></span>
+                </div>
+            </div>
+        </div>
+
         <div class="video-container">
-            <!-- Hidden raw video feed -->
             <video id="video" autoplay playsinline></video>
-            <!-- Processed video with landmarks -->
             <img id="processedVideo">
             <div class="confidence-bar">
                 <div id="confidenceLevel" class="confidence-level"></div>
@@ -134,7 +229,7 @@
         </div>
 
         <div class="footer">
-            <p>Real-time sign language translation with MediaPipe landmarks</p>
+            <p>Real-time sign language translation with MediaPipe landmarks and background replacement</p>
         </div>
     </div>
 
@@ -147,23 +242,26 @@
         const resetButton = document.getElementById('resetButton');
         const speakButton = document.getElementById('speakButton');
         const confidenceLevel = document.getElementById('confidenceLevel');
+        const backgroundToggle = document.getElementById('backgroundToggle');
+        const backgroundUpload = document.getElementById('backgroundUpload');
+        const uploadStatus = document.getElementById('uploadStatus');
 
         // Server connection
-        // For development (localhost) and production (ngrok)
-const socketUrl = window.location.hostname === 'localhost'
-  ? 'http://localhost:5000'
-  : 'https://fit-firstly-tuna.ngrok-free.app';
+        const socketUrl = window.location.hostname === 'localhost'
+            ? 'http://localhost:5000'
+            : 'https://fit-firstly-tuna.ngrok-free.app';
 
-const socket = io(socketUrl, {
-  // Additional options if needed
-  withCredentials: true,
-  extraHeaders: {
-    "ngrok-skip-browser-warning": "true" // This helps bypass ngrok's warning page
-  }
-});
+        const socket = io(socketUrl, {
+            withCredentials: true,
+            extraHeaders: {
+                "ngrok-skip-browser-warning": "true"
+            }
+        });
+
         let isConnected = false;
         let stream;
         let captureInterval;
+        let backgroundReplacementEnabled = true;
 
         // Initialize
         async function init() {
@@ -202,6 +300,14 @@ const socket = io(socketUrl, {
             isConnected = false;
             status.textContent = 'Disconnected from server';
             status.className = 'status disconnected';
+        });
+
+        socket.on('connection_status', (data) => {
+            console.log('Connection status:', data);
+            if (!data.background_available) {
+                uploadStatus.textContent = 'No background image loaded on server';
+                uploadStatus.style.color = '#dc3545';
+            }
         });
 
         socket.on('prediction', (data) => {
@@ -245,10 +351,54 @@ const socket = io(socketUrl, {
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                     const imageData = canvas.toDataURL('image/jpeg', 0.7);
                     const base64Data = imageData.split(',')[1];
-                    socket.emit('frame', { image: base64Data });
+
+                    socket.emit('frame', {
+                        image: base64Data,
+                        background_replacement: backgroundReplacementEnabled
+                    });
                 }
             }, 200); // 5 FPS
         }
+
+        // Background controls
+        backgroundToggle.addEventListener('change', (e) => {
+            backgroundReplacementEnabled = e.target.checked;
+        });
+
+        backgroundUpload.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('background', file);
+
+            uploadStatus.textContent = 'Uploading...';
+            uploadStatus.style.color = '#6c757d';
+
+            try {
+                const response = await fetch(`${socketUrl}/upload_background`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    uploadStatus.textContent = 'Background updated successfully!';
+                    uploadStatus.style.color = '#28a745';
+                } else {
+                    uploadStatus.textContent = `Error: ${result.error}`;
+                    uploadStatus.style.color = '#dc3545';
+                }
+            } catch (error) {
+                console.error('Upload error:', error);
+                uploadStatus.textContent = 'Upload failed';
+                uploadStatus.style.color = '#dc3545';
+            }
+
+            // Clear the input
+            e.target.value = '';
+        });
 
         // Button handlers
         resetButton.addEventListener('click', () => {
