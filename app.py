@@ -20,11 +20,7 @@ app.config['SECRET_KEY'] = 'secret!'
 # Configure CORS
 CORS(app, resources={
     r"/*": {
-        "origins": [
-            "https://fit-firstly-tuna.ngrok-free.app",
-            "http://localhost:*",
-            "http://127.0.0.1:*"
-        ],
+        "origins": "*",  # Allow all origins for testing
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type"]
     }
@@ -32,11 +28,7 @@ CORS(app, resources={
 
 # Configure Socket.IO
 socketio = SocketIO(app,
-                    cors_allowed_origins=[
-                        "https://fit-firstly-tuna.ngrok-free.app",
-                        "http://localhost:5000",
-                        "http://127.0.0.1:*"
-                    ],
+                    cors_allowed_origins="*",  # Allow all for testing
                     logger=True,
                     engineio_logger=True
                     )
@@ -63,7 +55,6 @@ labels_dict = {
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
-mp_selfie_segmentation = mp.solutions.selfie_segmentation
 
 hands = mp_hands.Hands(
     static_image_mode=False,
@@ -71,89 +62,30 @@ hands = mp_hands.Hands(
     min_detection_confidence=0.5
 )
 
-# Initialize selfie segmentation for background removal (use model 0 for speed)
-selfie_segmentation = mp_selfie_segmentation.SelfieSegmentation(model_selection=0)
-
-# Global background image
-background_image = None
-
-
-def load_background_image(image_path, width=640, height=480):
-    """Load and resize background image"""
-    global background_image
-    try:
-        bg = cv2.imread(image_path)
-        if bg is not None:
-            background_image = cv2.resize(bg, (width, height))
-            print(f"Background image loaded: {image_path}")
-            return True
-        else:
-            print(f"Could not load background image: {image_path}")
-            return False
-    except Exception as e:
-        print(f"Error loading background image: {e}")
-        return False
-
-
-# Load default background (you can change this path)
-load_background_image('./background.jpg')  # Place your background image here
-
-
 @app.route('/')
 def index():
     return jsonify({"status": "API is running"})
 
-
 @app.route('/test')
 def test():
     return send_from_directory('static', 'test_local.html')
-
 
 @app.route('/health')
 def health():
     return jsonify({
         "status": "healthy",
         "model_loaded": model is not None,
-        "background_loaded": background_image is not None,
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     })
-
-
-@app.route('/upload_background', methods=['POST'])
-def upload_background():
-    """Upload a new background image"""
-    try:
-        if 'background' not in request.files:
-            return jsonify({'error': 'No background file provided'}), 400
-
-        file = request.files['background']
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-
-        # Save uploaded file
-        filename = 'uploaded_background.jpg'
-        filepath = os.path.join('.', filename)
-        file.save(filepath)
-
-        # Load the new background
-        if load_background_image(filepath):
-            return jsonify({'message': 'Background updated successfully'})
-        else:
-            return jsonify({'error': 'Failed to load background image'}), 500
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
 
 @app.after_request
 def after_request(response):
     """Add additional CORS headers"""
-    response.headers.add('Access-Control-Allow-Origin', 'https://fit-firstly-tuna.ngrok-free.app')
+    response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     response.headers.add('Access-Control-Allow-Credentials', 'true')
     return response
-
 
 @socketio.on('connect')
 def handle_connect():
@@ -161,15 +93,12 @@ def handle_connect():
     emit('connection_status', {
         'status': 'connected',
         'sid': request.sid,
-        'server_time': time.strftime("%Y-%m-%d %H:%M:%S"),
-        'background_available': background_image is not None
+        'server_time': time.strftime("%Y-%m-%d %H:%M:%S")
     })
-
 
 @socketio.on('disconnect')
 def handle_disconnect():
     print(f'Client disconnected: {request.sid}')
-
 
 @socketio.on('frame')
 def handle_frame(data):
@@ -187,11 +116,8 @@ def handle_frame(data):
             emit('error', {'message': 'Could not decode image'}, room=request.sid)
             return
 
-        # Get background replacement preference
-        use_background_replacement = data.get('background_replacement', True)
-
         # Process frame
-        annotated_frame, prediction_data = process_frame(frame, use_background_replacement)
+        annotated_frame, prediction_data = process_frame(frame)
 
         # Encode annotated frame
         _, buffer = cv2.imencode('.jpg', annotated_frame)
@@ -212,49 +138,11 @@ def handle_frame(data):
             'timestamp': time.strftime("%Y-%m-%d %H:%M:%S")
         }, room=request.sid)
 
-
-def apply_background_replacement(frame):
-    """Apply background replacement using MediaPipe selfie segmentation"""
-    global background_image
-
-    if background_image is None:
-        return frame
-
-    try:
-        # Convert BGR to RGB for MediaPipe
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        # Process the frame to get segmentation mask
-        results = selfie_segmentation.process(rgb_frame)
-
-        # Create mask with optimized threshold
-        mask = results.segmentation_mask > 0.1
-
-        # Resize background to match frame size (cache this if possible)
-        h, w = frame.shape[:2]
-        if not hasattr(apply_background_replacement, 'cached_bg') or apply_background_replacement.cached_bg.shape[
-                                                                     :2] != (h, w):
-            apply_background_replacement.cached_bg = cv2.resize(background_image, (w, h))
-
-        # Use numpy where for faster blending
-        result = np.where(mask[..., None], frame, apply_background_replacement.cached_bg)
-
-        return result.astype(np.uint8)
-
-    except Exception as e:
-        print(f"Error in background replacement: {e}")
-        return frame
-
-
-def process_frame(frame, use_background_replacement=True):
+def process_frame(frame):
     data_aux = []
     x_ = []
     y_ = []
     prediction_data = {'text': '', 'confidence': 0}
-
-    # Apply background replacement first if enabled
-    if use_background_replacement:
-        frame = apply_background_replacement(frame)
 
     # Convert to RGB and process with MediaPipe
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -307,12 +195,9 @@ def process_frame(frame, use_background_replacement=True):
 
     return annotated_frame, prediction_data
 
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"Starting server on port {port}")
-    print(f"Ngrok URL: https://fit-firstly-tuna.ngrok-free.app")
-    print("Place your background image as 'background.jpg' in the same directory")
     socketio.run(app,
                  host='0.0.0.0',
                  port=port,
